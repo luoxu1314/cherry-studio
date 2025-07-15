@@ -529,7 +529,6 @@ export function registerIpc(mainWindow: BrowserWindow, app: Electron.App) {
   // Register MCP handlers
   ipcMain.handle(IpcChannel.Mcp_RemoveServer, mcpService.removeServer)
   ipcMain.handle(IpcChannel.Mcp_RestartServer, mcpService.restartServer)
-  ipcMain.handle(IpcChannel.Mcp_RefreshServer, mcpService.refreshServer)
   ipcMain.handle(IpcChannel.Mcp_StopServer, mcpService.stopServer)
   ipcMain.handle(IpcChannel.Mcp_ListTools, mcpService.listTools)
   ipcMain.handle(IpcChannel.Mcp_CallTool, mcpService.callTool)
