@@ -363,6 +363,9 @@ class McpService {
           // Store the new client in the cache
           this.clients.set(serverKey, client)
 
+          // Clear existing cache to ensure fresh data
+          this.clearServerCache(serverKey)
+
           Logger.info(`[MCP] Activated server: ${server.name}`)
           return client
         } catch (error: any) {
@@ -381,6 +384,24 @@ class McpService {
     return initPromise
   }
 
+  /**
+   * Clear all caches for a specific server
+   */
+  private clearServerCache(serverKey: string) {
+    CacheService.remove(`mcp:list_tool:${serverKey}`)
+    CacheService.remove(`mcp:prompts:${serverKey}`)
+    CacheService.remove(`mcp:resources:${serverKey}`)
+    Logger.info(`[MCP] Cleared all caches for server: ${serverKey}`)
+  }
+
+  /**
+   * Refresh server cache by clearing all cached data
+   */
+  async refreshServer(_: Electron.IpcMainInvokeEvent, serverKey: string) {
+    this.clearServerCache(serverKey)
+    Logger.info(`[MCP] Refreshed server cache: ${serverKey}`)
+  }
+
   async closeClient(serverKey: string) {
     const client = this.clients.get(serverKey)
     if (client) {
@@ -388,8 +409,9 @@ class McpService {
       await client.close()
       Logger.info(`[MCP] Closed server: ${serverKey}`)
       this.clients.delete(serverKey)
-      CacheService.remove(`mcp:list_tool:${serverKey}`)
-      Logger.info(`[MCP] Cleared cache for server: ${serverKey}`)
+
+      // Clear all caches for this server
+      this.clearServerCache(serverKey)
     } else {
       Logger.warn(`[MCP] No client found for server: ${serverKey}`)
     }
@@ -425,6 +447,8 @@ class McpService {
     Logger.info(`[MCP] Restarting server: ${server.name}`)
     const serverKey = this.getServerKey(server)
     await this.closeClient(serverKey)
+    // Clear cache before restarting to ensure fresh data
+    this.clearServerCache(serverKey)
     await this.initClient(server)
   }
 
