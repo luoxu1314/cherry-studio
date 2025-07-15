@@ -389,8 +389,8 @@ class McpService {
    */
   private clearServerCache(serverKey: string) {
     CacheService.remove(`mcp:list_tool:${serverKey}`)
-    CacheService.remove(`mcp:prompts:${serverKey}`)
-    CacheService.remove(`mcp:resources:${serverKey}`)
+    CacheService.remove(`mcp:list_prompts:${serverKey}`)
+    CacheService.remove(`mcp:list_resources:${serverKey}`)
     Logger.info(`[MCP] Cleared all caches for server: ${serverKey}`)
   }
 
