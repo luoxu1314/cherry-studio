@@ -86,6 +86,9 @@ class McpService {
   private dxtService = new DxtService()
   private activeToolCalls: Map<string, AbortController> = new Map()
 
+  // Event emitters for server notifications - following VS Code pattern
+  private readonly notificationEmitters = new Map<string, EventEmitter>()
+
   constructor() {
     this.initClient = this.initClient.bind(this)
     this.listTools = this.listTools.bind(this)
@@ -97,6 +100,7 @@ class McpService {
     this.closeClient = this.closeClient.bind(this)
     this.removeServer = this.removeServer.bind(this)
     this.restartServer = this.restartServer.bind(this)
+    this.refreshServer = this.refreshServer.bind(this)
     this.stopServer = this.stopServer.bind(this)
     this.abortTool = this.abortTool.bind(this)
     this.cleanup = this.cleanup.bind(this)
@@ -113,6 +117,41 @@ class McpService {
       env: server.env,
       id: server.id
     })
+  }
+
+  /**
+   * Get or create event emitter for a specific server
+   */
+  private getServerEventEmitter(serverKey: string): EventEmitter {
+    if (!this.notificationEmitters.has(serverKey)) {
+      this.notificationEmitters.set(serverKey, new EventEmitter())
+    }
+    return this.notificationEmitters.get(serverKey)!
+  }
+
+  /**
+   * Subscribe to server notifications
+   */
+  public onServerNotification(
+    server: MCPServer,
+    event:
+      | 'tools-changed'
+      | 'prompts-changed'
+      | 'resources-changed'
+      | 'resource-updated'
+      | 'progress'
+      | 'cancelled'
+      | 'logging',
+    callback: (data?: any) => void
+  ): () => void {
+    const serverKey = this.getServerKey(server)
+    const emitter = this.getServerEventEmitter(serverKey)
+    emitter.on(event, callback)
+
+    // Return unsubscribe function
+    return () => {
+      emitter.removeListener(event, callback)
+    }
   }
 
   async initClient(server: MCPServer): Promise<Client> {
@@ -402,55 +441,220 @@ class McpService {
    */
   private setupNotificationHandlers(client: Client, server: MCPServer) {
     const serverKey = this.getServerKey(server)
+    const emitter = this.getServerEventEmitter(serverKey)
 
     try {
       // Set up tools list changed notification handler
-      client.setNotificationHandler(ToolListChangedNotificationSchema, async () => {
-        Logger.info(`[MCP] Tools list changed for server: ${server.name}`)
-        // Clear tools cache
-        CacheService.remove(`mcp:list_tool:${serverKey}`)
+      client.setNotificationHandler(ToolListChangedNotificationSchema, async (notification) => {
+        await this.handleToolsListChanged(server, serverKey, emitter, notification)
       })
 
       // Set up resources list changed notification handler
-      client.setNotificationHandler(ResourceListChangedNotificationSchema, async () => {
-        Logger.info(`[MCP] Resources list changed for server: ${server.name}`)
-        // Clear resources cache
-        CacheService.remove(`mcp:list_resources:${serverKey}`)
+      client.setNotificationHandler(ResourceListChangedNotificationSchema, async (notification) => {
+        await this.handleResourcesListChanged(server, serverKey, emitter, notification)
       })
 
       // Set up prompts list changed notification handler
-      client.setNotificationHandler(PromptListChangedNotificationSchema, async () => {
-        Logger.info(`[MCP] Prompts list changed for server: ${server.name}`)
-        // Clear prompts cache
-        CacheService.remove(`mcp:list_prompts:${serverKey}`)
+      client.setNotificationHandler(PromptListChangedNotificationSchema, async (notification) => {
+        await this.handlePromptsListChanged(server, serverKey, emitter, notification)
       })
 
       // Set up resource updated notification handler
-      client.setNotificationHandler(ResourceUpdatedNotificationSchema, async () => {
-        Logger.info(`[MCP] Resource updated for server: ${server.name}`)
-        // Clear resource-specific caches
-        this.clearResourceCaches(serverKey)
+      client.setNotificationHandler(ResourceUpdatedNotificationSchema, async (notification) => {
+        await this.handleResourceUpdated(server, serverKey, emitter, notification)
       })
 
       // Set up progress notification handler
       client.setNotificationHandler(ProgressNotificationSchema, async (notification) => {
-        Logger.info(`[MCP] Progress notification received for server: ${server.name}`, notification.params)
+        this.handleProgressNotification(server, serverKey, emitter, notification)
       })
 
       // Set up cancelled notification handler
       client.setNotificationHandler(CancelledNotificationSchema, async (notification) => {
-        Logger.info(`[MCP] Operation cancelled for server: ${server.name}`, notification.params)
+        this.handleCancelledNotification(server, serverKey, emitter, notification)
       })
 
       // Set up logging message notification handler
       client.setNotificationHandler(LoggingMessageNotificationSchema, async (notification) => {
-        Logger.info(`[MCP] Message from server ${server.name}:`, notification.params)
+        this.handleLoggingNotification(server, serverKey, emitter, notification)
       })
 
       Logger.info(`[MCP] Set up notification handlers for server: ${server.name}`)
     } catch (error) {
       Logger.error(`[MCP] Failed to set up notification handlers for server ${server.name}:`, error)
     }
+  }
+
+  /**
+   * Handle tools list changed notification
+   */
+  private async handleToolsListChanged(
+    server: MCPServer,
+    serverKey: string,
+    emitter: EventEmitter,
+    notification: any
+  ): Promise<void> {
+    Logger.info(`[MCP] Tools list changed for server: ${server.name}`)
+
+    // Clear tools cache
+    CacheService.remove(`mcp:list_tool:${serverKey}`)
+
+    // Preload updated tools list to ensure fresh data is available
+    try {
+      const updatedTools = await this.listToolsImpl(server)
+      Logger.info(`[MCP] Preloaded ${updatedTools.length} updated tools for server: ${server.name}`)
+
+      // Emit event for subscribers
+      emitter.emit('tools-changed', { tools: updatedTools, notification })
+    } catch (error) {
+      Logger.error(`[MCP] Failed to preload tools list for server: ${server.name}`, error)
+      emitter.emit('tools-changed', { error, notification })
+    }
+  }
+
+  /**
+   * Handle resources list changed notification
+   */
+  private async handleResourcesListChanged(
+    server: MCPServer,
+    serverKey: string,
+    emitter: EventEmitter,
+    notification: any
+  ): Promise<void> {
+    Logger.info(`[MCP] Resources list changed for server: ${server.name}`)
+
+    // Clear resources cache
+    CacheService.remove(`mcp:list_resources:${serverKey}`)
+
+    // Preload updated resources list to ensure fresh data is available
+    try {
+      const updatedResources = await this.listResourcesImpl(server)
+      Logger.info(`[MCP] Preloaded ${updatedResources.length} updated resources for server: ${server.name}`)
+
+      // Emit event for subscribers
+      emitter.emit('resources-changed', { resources: updatedResources, notification })
+    } catch (error) {
+      Logger.error(`[MCP] Failed to preload resources list for server: ${server.name}`, error)
+      emitter.emit('resources-changed', { error, notification })
+    }
+  }
+
+  /**
+   * Handle prompts list changed notification
+   */
+  private async handlePromptsListChanged(
+    server: MCPServer,
+    serverKey: string,
+    emitter: EventEmitter,
+    notification: any
+  ): Promise<void> {
+    Logger.info(`[MCP] Prompts list changed for server: ${server.name}`)
+
+    // Clear prompts cache
+    CacheService.remove(`mcp:list_prompts:${serverKey}`)
+
+    // Preload updated prompts list to ensure fresh data is available
+    try {
+      const updatedPrompts = await this.listPromptsImpl(server)
+      Logger.info(`[MCP] Preloaded ${updatedPrompts.length} updated prompts for server: ${server.name}`)
+
+      // Emit event for subscribers
+      emitter.emit('prompts-changed', { prompts: updatedPrompts, notification })
+    } catch (error) {
+      Logger.error(`[MCP] Failed to preload prompts list for server: ${server.name}`, error)
+      emitter.emit('prompts-changed', { error, notification })
+    }
+  }
+
+  /**
+   * Handle resource updated notification
+   */
+  private async handleResourceUpdated(
+    server: MCPServer,
+    serverKey: string,
+    emitter: EventEmitter,
+    notification: any
+  ): Promise<void> {
+    Logger.info(`[MCP] Resource updated for server: ${server.name}`, notification.params)
+
+    // Clear resource-specific caches
+    this.clearResourceCaches(serverKey)
+
+    // Emit event for subscribers
+    emitter.emit('resource-updated', { notification })
+  }
+
+  /**
+   * Handle progress notification
+   */
+  private handleProgressNotification(
+    server: MCPServer,
+    _serverKey: string,
+    emitter: EventEmitter,
+    notification: any
+  ): void {
+    Logger.info(`[MCP] Progress notification received for server: ${server.name}`, notification.params)
+
+    // Emit event for subscribers
+    emitter.emit('progress', { notification })
+  }
+
+  /**
+   * Handle cancelled notification
+   */
+  private handleCancelledNotification(
+    server: MCPServer,
+    _serverKey: string,
+    emitter: EventEmitter,
+    notification: any
+  ): void {
+    Logger.info(`[MCP] Operation cancelled for server: ${server.name}`, notification.params)
+
+    // Emit event for subscribers
+    emitter.emit('cancelled', { notification })
+  }
+
+  /**
+   * Handle logging notification
+   */
+  private handleLoggingNotification(
+    server: MCPServer,
+    _serverKey: string,
+    emitter: EventEmitter,
+    notification: any
+  ): void {
+    const params = notification.params
+    let contents = typeof params.data === 'string' ? params.data : JSON.stringify(params.data)
+
+    if (params.logger) {
+      contents = `${params.logger}: ${contents}`
+    }
+
+    // Log at appropriate level based on notification level
+    switch (params?.level) {
+      case 'debug':
+        Logger.debug(`[MCP] ${server.name}: ${contents}`)
+        break
+      case 'info':
+      case 'notice':
+        Logger.info(`[MCP] ${server.name}: ${contents}`)
+        break
+      case 'warning':
+        Logger.warn(`[MCP] ${server.name}: ${contents}`)
+        break
+      case 'error':
+      case 'critical':
+      case 'alert':
+      case 'emergency':
+        Logger.error(`[MCP] ${server.name}: ${contents}`)
+        break
+      default:
+        Logger.info(`[MCP] ${server.name}: ${contents}`)
+        break
+    }
+
+    // Emit event for subscribers
+    emitter.emit('logging', { level: params?.level || 'info', message: contents, notification })
   }
 
   /**
@@ -479,6 +683,14 @@ class McpService {
       this.clients.delete(serverKey)
       // Clear all caches for this server
       this.clearServerCache(serverKey)
+
+      // Clean up notification emitter
+      const emitter = this.notificationEmitters.get(serverKey)
+      if (emitter) {
+        emitter.removeAllListeners()
+        this.notificationEmitters.delete(serverKey)
+        Logger.info(`[MCP] Cleaned up notification emitter for server: ${serverKey}`)
+      }
     } else {
       Logger.warn(`[MCP] No client found for server: ${serverKey}`)
     }
@@ -517,6 +729,46 @@ class McpService {
     // Clear cache before restarting to ensure fresh data
     this.clearServerCache(serverKey)
     await this.initClient(server)
+  }
+
+  /**
+   * Refresh a server without restarting - clears cache and preloads fresh data
+   */
+  async refreshServer(_: Electron.IpcMainInvokeEvent, server: MCPServer) {
+    Logger.info(`[MCP] Refreshing server data: ${server.name}`)
+    const serverKey = this.getServerKey(server)
+
+    try {
+      // Verify client is still connected
+      const client = this.clients.get(serverKey)
+      if (!client) {
+        Logger.warn(`[MCP] No client found for server: ${server.name}, initializing new client`)
+        await this.initClient(server)
+        return
+      }
+
+      // Clear all caches for this server
+      this.clearServerCache(serverKey)
+
+      // Preload fresh data in parallel
+      const refreshPromises = [
+        this.listToolsImpl(server).catch((error) =>
+          Logger.error(`[MCP] Failed to refresh tools for server: ${server.name}`, error)
+        ),
+        this.listPromptsImpl(server).catch((error) =>
+          Logger.error(`[MCP] Failed to refresh prompts for server: ${server.name}`, error)
+        ),
+        this.listResourcesImpl(server).catch((error) =>
+          Logger.error(`[MCP] Failed to refresh resources for server: ${server.name}`, error)
+        )
+      ]
+
+      await Promise.allSettled(refreshPromises)
+      Logger.info(`[MCP] Successfully refreshed server data: ${server.name}`)
+    } catch (error) {
+      Logger.error(`[MCP] Failed to refresh server: ${server.name}`, error)
+      throw error
+    }
   }
 
   async cleanup() {
